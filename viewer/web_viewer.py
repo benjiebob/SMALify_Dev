@@ -19,6 +19,10 @@ from tqdm import trange
 
 import os
 import config
+from utils import eul_to_axis
+from contextlib import nullcontext
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = config.GPU_IDS
@@ -43,7 +47,6 @@ def load_sequence(image_range, dataset, name):
 
 @st.cache(allow_output_mutation=True)
 def load_fitter_model(data):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     assert config.SHAPE_FAMILY >= 0, "Shape family should be greater than 0"
 
     use_unity_prior = config.SHAPE_FAMILY == 1 and not config.FORCE_SMAL_PRIOR
@@ -73,12 +76,134 @@ def load_fitter_model(data):
 # - Allow downloading the result mesh/weights
 
 # vis_frequency = config.VIS_FREQUENCY
+
+st.title("SMALify - 3D Animal Reconstruction")
+
 vis_frequency = 25
 dataset, name = config.SEQUENCE_OR_IMAGE_NAME.split(":")
 image_range = [0]
 data, filenames = load_sequence(image_range, dataset, name)
 model = load_fitter_model(data)
 
+
+def draw_axes_widget(label, key, min_value, max_value, default, step, use_cols=False):
+    rot_cols = iter(st.columns(3)) if use_cols else iter([None] * 3)
+    for rot_id, rot_axis in enumerate(["X", "Y", "Z"]):
+        with next(rot_cols) if use_cols else nullcontext():
+            st.session_state[f"{key}_{rot_axis}"] = st.slider(
+                f"{label} {rot_axis}",
+                min_value=min_value,
+                max_value=max_value,
+                value=float(default[rot_id]),
+                step=step,
+            )
+
+
+def draw_axes_check_widget(label, key, is_enabled):
+    rot_cols = iter(st.columns(3))
+    for rot_id, rot_axis in enumerate(["X", "Y", "Z"]):
+        with next(rot_cols):
+            st.session_state[f"{key}_{rot_axis}"] = st.checkbox(
+                f"{label} {rot_axis}", value=is_enabled[rot_id]
+            )
+
+
+with st.sidebar:
+    tabs = iter(
+        st.tabs(["Initialization", "Joint Rotation", "Joint Enabled", "Weights"])
+    )
+    with next(tabs):
+        default_rot = [-np.pi / 2, 0, -np.pi]
+        default_trans = [1.0, 0.0, 0.0]
+        draw_axes_widget("Rotation", "R", -2 * np.pi, 2 * np.pi, default_rot, np.pi / 8)
+        draw_axes_widget("Translation", "T", -2.0, 2.0, default_trans, 0.1)
+
+    with next(tabs):
+        # group_names = list(config.N_POSE_GROUPS.keys())
+        selected_joint = st.selectbox(
+            "Joint",
+            enumerate(config.N_POSE_NAMES),
+            format_func=lambda x: f"({x[0]}) {x[1]}",
+        )
+        joint_id, joint_name = selected_joint
+        joint_mask = model.rotation_mask[joint_id].data.cpu().numpy()
+        draw_axes_widget(
+            f"({joint_id}) {joint_name}",
+            f"R{joint_id}",
+            -np.pi,
+            np.pi,
+            [0.0, 0.0, 0.0],
+            np.pi / 8,
+        )
+
+    # with next(tabs):
+    #     for group_name, joint_list in config.N_POSE_GROUPS.items():
+    #         with st.expander(group_name):
+    #             for joint_id in joint_list:
+    #                 joint_name = config.N_POSE_NAMES[joint_id]
+    #                 joint_mask = model.rotation_mask[joint_id].data.cpu().numpy()
+    #                 draw_axes_check_widget(joint_name, f"M{joint_id}", joint_mask)
+
+    axis_rots = np.zeros((config.N_POSE, 3))
+    for joint_id, joint_name in enumerate(config.N_POSE_NAMES):
+        eul_rot = np.zeros((3))
+        for rot_id, rot_axis in enumerate(["X", "Y", "Z"]):
+            rot_label = f"R{joint_id}_{rot_axis}"
+            check_label = f"C{joint_id}_{rot_axis}"
+            if rot_label not in st.session_state:
+                st.session_state[rot_label] = 0.0
+            if check_label not in st.session_state:
+                st.session_state[check_label] = True
+
+            eul_rot[rot_id] = st.session_state[rot_label]
+            joint_enabled = st.session_state[check_label]
+
+            model.rotation_mask[joint_id, rot_id] = int(joint_enabled)
+        axis_rots[joint_id] = eul_to_axis(eul_rot)
+
+    st.table(axis_rots)
+
+model.joint_rotations = torch.nn.Parameter(
+    torch.from_numpy(axis_rots)
+    .unsqueeze(0)
+    .repeat(model.num_images, 1, 1)
+    .float()
+    .to(device)
+)
+
+model.global_rotation = torch.nn.Parameter(
+    torch.from_numpy(
+        eul_to_axis(
+            np.array(
+                [
+                    st.session_state["R_X"],
+                    st.session_state["R_Y"],
+                    st.session_state["R_Z"],
+                ]
+            )
+        )
+    )
+    .repeat(model.num_images, 1)
+    .float()
+    .to(device)
+)
+
+model.trans = torch.nn.Parameter(
+    torch.from_numpy(
+        np.array(
+            [
+                st.session_state["T_X"],
+                st.session_state["T_Y"],
+                st.session_state["T_Z"],
+            ]
+        )
+    )
+    .repeat(model.num_images, 1)
+    .float()
+    .to(device)
+)
+
+# st.write(model.joint_rotations)
 
 click = st.button("Start the Fitter")
 progress_bar = st.progress(0)
@@ -90,7 +215,6 @@ model.generate_visualization(image_exporter)  # Final stage
 
 
 if click:
-
     dataset_size = len(filenames)
     print("Dataset size: {0}".format(dataset_size))
 

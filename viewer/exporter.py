@@ -4,6 +4,8 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 from copy import deepcopy
+import config
+from PIL import ImageColor
 
 
 class ImageExporter:
@@ -56,30 +58,45 @@ class ImageExporter:
             )
         )
 
-    def add_mesh(self, mesh):
-        fig = go.Figure(
-            data=[
-                go.Mesh3d(
-                    x=mesh.vertices[:, 0],
-                    y=mesh.vertices[:, 1],
-                    z=mesh.vertices[:, 2],
-                    i=mesh.faces[:, 0],
-                    j=mesh.faces[:, 1],
-                    k=mesh.faces[:, 2],
-                    lighting=dict(
-                        ambient=0.5, diffuse=0.5, fresnel=0.0, specular=0, roughness=0.0
-                    ),
-                    lightposition=dict(x=0.0, y=0.0, z=200.0),
-                    color="lightpink",
-                    opacity=1.0,
+    def add_mesh(self, mesh, joints=None):
+        objs = [
+            go.Mesh3d(
+                x=mesh.vertices[:, 0],
+                y=mesh.vertices[:, 1],
+                z=mesh.vertices[:, 2],
+                i=mesh.faces[:, 0],
+                j=mesh.faces[:, 1],
+                k=mesh.faces[:, 2],
+                lighting=dict(
+                    ambient=0.5, diffuse=0.5, fresnel=0.0, specular=0, roughness=0.0
+                ),
+                lightposition=dict(x=0.0, y=0.0, z=200.0),
+                color="lightpink",
+                opacity=0.5,
+            )
+        ]
+        if joints is not None:
+            for joint_id, joint in enumerate(joints):
+                # color = ImageColor.getcolor(config.N_POSE_COLORS[joint_id], "RGB")
+                objs.append(
+                    go.Scatter3d(
+                        x=[joint[0]],
+                        y=[joint[1]],
+                        z=[joint[2]],
+                        name=f"joint_{joint_id}",
+                        visible="legendonly",
+                        # color=color,
+                        # mode="markers",
+                        # marker=dict(color=[color]),
+                    )
                 )
-            ]
-        )
-
+        fig = go.Figure(data=objs)
         return fig
 
-    def render_scene(self, mesh, up=[0, 1, 0], eye=[0.0, 0.0, 1.0], box_size=1.5):
-        fig = self.add_mesh(mesh)
+    def render_scene(
+        self, mesh, joints=None, up=[0, 1, 0], eye=[0.0, 0.0, 1.0], box_size=1.5
+    ):
+        fig = self.add_mesh(mesh, joints)
         self.add_hack_points(fig)
         camera = dict(
             up=dict(x=up[0], y=up[1], z=up[2]),
@@ -96,21 +113,38 @@ class ImageExporter:
         fig.update_scenes(patch=scene)
         return fig
 
-    def export(self, collage_np, batch_id, global_id, img_parameters, vertices, faces):
+    def export(
+        self,
+        collage_np,
+        batch_id,
+        global_id,
+        img_parameters,
+        vertices,
+        faces,
+        joints=None,
+    ):
         caption = f"st{self.stage_id}_ep{self.epoch_name}.png"
 
         self.placeholder.empty()
         with self.placeholder.container():
-            st.image(collage_np, caption=caption)
+            st.image(collage_np, caption=caption, use_column_width=True)
 
             # Export mesh
             vertices = vertices[batch_id].cpu().numpy()
+            joints = joints[batch_id].cpu().numpy() if joints is not None else None
             mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
-            mesh.vertices = mesh.vertices - mesh.vertices.mean(axis=0)
-            fig_front = self.render_scene(mesh, up=[0, 1, 0], eye=[0.0, 0.0, 1.0])
-            fig_side = self.render_scene(mesh, up=[0, 1, 0], eye=[-1.0, 0.0, 0.0])
-            fig_top = self.render_scene(mesh, up=[0, 0, 1], eye=[0.0, 1.0, 0.0])
+            anchor = mesh.vertices.mean(axis=0)
+            mesh.vertices = mesh.vertices - anchor
+            if joints is not None:
+                joints = joints - anchor
+            fig_front = self.render_scene(
+                mesh, joints, up=[0, 1, 0], eye=[0.0, 0.0, 1.0]
+            )
+            fig_side = self.render_scene(
+                mesh, joints, up=[0, 1, 0], eye=[-1.0, 0.0, 0.0]
+            )
+            fig_top = self.render_scene(mesh, joints, up=[0, 0, 1], eye=[0.0, 1.0, 0.0])
 
             cols = iter(st.columns([1, 1, 1]))
             with next(cols):
